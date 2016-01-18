@@ -1,7 +1,7 @@
 #!/usr/bin/python3
-import urllib
 import os
 import bencodepy
+import sys
 import socket
 import struct
 import asyncio
@@ -289,7 +289,7 @@ def handle(request):
     logging.warning('Tracker connection received!')
 
     uri = request.match_info.get('uri')
-    r = yield from aiohttp.get('http://tracker.aletorrenty.pl:2710' + request.path_qs)
+    r = yield from aiohttp.get(sys.argv[1] + request.path_qs)
     data = yield from r.read()
     yield from r.release()
 
@@ -322,6 +322,10 @@ def init(loop):
     srv = yield from loop.create_server(app.make_handler(), '127.0.0.1', 8080)
     logging.warning("Server started at http://127.0.0.1:8080")
     return srv
+
+if len(sys.argv) != 2:
+    logging.error('Usage: {} <tracker>'.format(sys.argv[0]))
+    quit()
 
 loop = asyncio.get_event_loop()
 loop.run_until_complete(init(loop))
