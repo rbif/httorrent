@@ -8,8 +8,7 @@ import asyncio
 from aiohttp import web
 import aiohttp
 import logging
-logging.basicConfig(level=logging.INFO)
-logging.basicConfig(format='%(asctime)-15s %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)-15s %(message)s')
 
 # /announce?info_hash=%BF%DBFvk%D0%E3%22%5C%25%99%E4%3B%23R%B2%F2%92%E3%DB&peer_id=-lt0D20-%7E%19%B6%CA%C9P%14%EDY%1A%97%A9&key=0e1d2537&compact=1&port=6966&uploaded=0&downloaded=0&left=740105370&event=started
 
