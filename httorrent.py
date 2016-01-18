@@ -29,6 +29,12 @@ class TorrentHandshook(Exception):
 def unpack(fmt, message):
     return struct.unpack_from(fmt, message) + ( message[struct.calcsize(fmt):], )
 
+def ip2int(ip):
+    return struct.unpack('>I', socket.inet_aton(ip))[0]
+
+def int2ip(_num):
+    return socket.inet_ntoa(struct.pack('>I', _num))
+
 def decode_peers(peers):
     _peers = []
  
@@ -283,16 +289,15 @@ def handle(request):
     torrent = bencodepy.decode(data)
     proxied_peers = []
 
-    octet1, octet2 = 0, 37
-    for peer in decode_peers(torrent[b'peers']):
-        octet1 += 1
-        if octet1 == 256:
-            octet1 = 0
-            octet2 += 1
-
-        ip = '127.13.{}.{}'.format(octet2, octet1)
+    base_ip = ip2int('127.13.37.0')
+    for index, peer in enumerate(decode_peers(torrent[b'peers'])):
+        ip = int2ip(base_ip + index)
         print('[*] Proxying to: {}'.format(peer))
-        server = yield from loop.create_server(lambda: TorrentProxy(peer), ip, 0)
+
+        def cb(_peer):
+            return lambda: TorrentProxy(_peer)
+
+        server = yield from loop.create_server(cb(peer), ip, 0)
 
         port = server.sockets[0].getsockname()[1]
         proxied_peers.append({ 'ip': ip, 'port': port })
