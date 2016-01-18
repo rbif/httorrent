@@ -7,6 +7,9 @@ import struct
 import asyncio
 from aiohttp import web
 import aiohttp
+import logging
+logging.basicConfig(level=logging.INFO)
+logging.basicConfig(format='%(asctime)-15s %(message)s')
 
 # /announce?info_hash=%BF%DBFvk%D0%E3%22%5C%25%99%E4%3B%23R%B2%F2%92%E3%DB&peer_id=-lt0D20-%7E%19%B6%CA%C9P%14%EDY%1A%97%A9&key=0e1d2537&compact=1&port=6966&uploaded=0&downloaded=0&left=740105370&event=started
 
@@ -60,7 +63,7 @@ def encode_peers(peers):
 
 def do(func):
     def func_wrapper(self, *args):
-        for index, message_type in enumerate(TorrentProtocol.messages):
+        for index, message_type in TorrentProtocol.messages.iteritems():
             if 'do_' + message_type[0] == func.__name__:
                 break
 
@@ -80,11 +83,11 @@ def do(func):
     return func_wrapper
 
 class TorrentProtocol:
-    messages = [
-        ('choke', 0), ('unchoke', 0), ('interested', 0), ('uninterested', 0),
-        ('have', 4, 1), ('bitfield', '?'), ('request', 12, 3), ('piece', '?', 3),
-        ('cancel', 12, 3)
-    ] 
+    messages = {
+        0: ('choke', 0), 1: ('unchoke', 0), 2: ('interested', 0), 3: ('uninterested', 0),
+        4: ('have', 4, 1), 5: ('bitfield', '?'), 6: ('request', 12, 3), 
+        7: ('piece', '?', 3), 8: ('cancel', 12, 3), 20: ('extended', '?')
+    } 
 
     def __init__(self, ip, port):
         self.peer_id = os.urandom(20)
@@ -113,10 +116,11 @@ class TorrentProtocol:
             raise TorrentException('Invalid protocol length in handshake.')
 
         self.info_hash = info_hash
+        self.peer_id = peer_id
         #if info_hash != self.info_hash:
         #    raise TorrentException('Info hash does not match in handshake.')
 
-        print('[*] Handshake completed with peer.')
+        logging.info('Handshake completed with peer.')
         self.peer_id = peer_id
         self.got_handshake = True
         return message
@@ -128,12 +132,10 @@ class TorrentProtocol:
         length, message_id, message = unpack('>IB', message)
         length -= 1
 
-        print(length, message_id)
-
         if len(message) < length:
             raise TorrentWantData()
 
-        if message_id > len(self.messages):
+        if message_id not in self.messages:
             raise TorrentException('Invalid message id specified.')
 
         message_type = self.messages[message_id]
@@ -142,7 +144,7 @@ class TorrentProtocol:
             raise TorrentException('Invalid message id and length.')
 
         payload, message = message[:length], message[length:]
-        print('[*] Got message type %s.' % message_type[0])
+        logging.info('Got message type %s.' % message_type[0])
         getattr(self, 'message_' + message_type[0])(payload)
         return message
 
@@ -160,7 +162,7 @@ class TorrentProtocol:
 
     def message_have(self, payload):
         piece = unpack('>I', payload)[0]
-        print(piece, self.pieces[piece])
+        logging.debug(piece, self.pieces[piece])
 
     def message_bitfield(self, payload):
         self.pieces = []
@@ -178,6 +180,10 @@ class TorrentProtocol:
 
     def message_cancel(self, payload):
         piece, block_offset, block_length, payload = unpack('>III', payload)
+
+    def message_extended(self, payload):
+        extension, payload = unpack('>B', payload)
+        logging.info('Extension {}: {}'.format(extension, bencodepy.decode(payload)))
 
     @do
     def do_choke(self):
@@ -215,6 +221,10 @@ class TorrentProtocol:
     def do_cancel(self, piece, block_offset, block_length):
         return struct.pack('>III', piece, block_offset, block_length)
 
+    @do
+    def do_extended(self):
+        pass
+
 class TorrentProxy(asyncio.Protocol):
     def __init__(self, peer, callback=None, peer_transport=None):
         self.peer_transport = peer_transport
@@ -230,7 +240,7 @@ class TorrentProxy(asyncio.Protocol):
         super().__init__()
 
     def connection_made(self, transport):
-        print('Connecting to {}'.format(self.peer))
+        logging.warning('Connecting to {}'.format(self.peer))
         self.transport = transport
 
         if not self.callback:
@@ -243,17 +253,15 @@ class TorrentProxy(asyncio.Protocol):
     def peer_connected(self, transport):
         self.peer_transport = transport
         if self.waiting:
-            print('[!] Flushing waiting data!')
-            print(self.waiting)
+            logging.debug('Flushing waiting data!')
             self.peer_transport.write(self.waiting)
             self.waiting = b''
 
     def data_received(self, data):
         if not data:
-            print('[*] Connection closed.')
+            logging.warning('Connection closed.')
             return
 
-        print(data)
         if not self.peer_transport:
             self.waiting += data
         else:
@@ -265,21 +273,21 @@ class TorrentProxy(asyncio.Protocol):
             try:
                 self.data = self.torrent.decode_message(self.data)
             except TorrentWantData:
-                print('[*] Data wanted.')
+                logging.debug('Data wanted.')
                 break
             except TorrentException as e:
-                print('[!] %s' % e)
+                logging.warning('Error: %s' % e)
                 break
             except struct.error:
-                print('[!] Not enough data received.')
+                logging.debug('Not enough data received.')
                 break
 
     def connection_lost(self, exc):
-        print('[!] Server disconnected.')
+        logging.warning('Server disconnected.')
 
 @asyncio.coroutine
 def handle(request):
-    print('[*] Tracker connection received!')
+    logging.warning('Tracker connection received!')
 
     uri = request.match_info.get('uri')
     r = yield from aiohttp.get('http://tracker.aletorrenty.pl:2710' + request.path_qs)
@@ -292,7 +300,6 @@ def handle(request):
     base_ip = ip2int('127.13.37.0')
     for index, peer in enumerate(decode_peers(torrent[b'peers'])):
         ip = int2ip(base_ip + index)
-        print('[*] Proxying to: {}'.format(peer))
 
         def cb(_peer):
             return lambda: TorrentProxy(_peer)
@@ -302,7 +309,7 @@ def handle(request):
         port = server.sockets[0].getsockname()[1]
         proxied_peers.append({ 'ip': ip, 'port': port })
 
-        print('[*] Opened listener on {}'.format(port))
+        logging.info('Opened listener on {}'.format(port))
 
     torrent[b'peers'] = encode_peers(proxied_peers)
 
@@ -314,7 +321,7 @@ def init(loop):
     app.router.add_route('GET', '/{uri}', handle)
 
     srv = yield from loop.create_server(app.make_handler(), '127.0.0.1', 8080)
-    print("[*] Server started at http://127.0.0.1:8080")
+    logging.warning("Server started at http://127.0.0.1:8080")
     return srv
 
 loop = asyncio.get_event_loop()
