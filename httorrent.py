@@ -122,6 +122,8 @@ class TorrentProtocol:
         length, message_id, message = unpack('>IB', message)
         length -= 1
 
+        print(length, message_id)
+
         if len(message) < length:
             raise TorrentWantData()
 
@@ -157,7 +159,7 @@ class TorrentProtocol:
     def message_bitfield(self, payload):
         self.pieces = []
 
-        payload = ''.join(format(ord(x), '08b') for x in payload)
+        payload = ''.join(format(x, '08b') for x in payload)
 
         for piece in payload:
             self.pieces.append({ 'has': piece == '1', 'downloaded': False })
@@ -207,67 +209,67 @@ class TorrentProtocol:
     def do_cancel(self, piece, block_offset, block_length):
         return struct.pack('>III', piece, block_offset, block_length)
 
-class TorrentProxy():
-    def __init__(self, peer):
+class TorrentProxy(asyncio.Protocol):
+    def __init__(self, peer, callback=None, peer_transport=None):
+        self.peer_transport = peer_transport
+        self.callback = callback
+
         self.closed = False
         self.peer = peer
+        self.waiting = b''
         self.data = b''
         self.proxy_data = b''
+
         self.torrent = TorrentProtocol(self.peer['ip'], self.peer['port'])
-        self.proxy_torrent = TorrentProtocol(self.peer['ip'], self.peer['port'])
         super().__init__()
 
-    @asyncio.coroutine
-    def conn(self, reader, writer):
+    def connection_made(self, transport):
         print('Connecting to {}'.format(self.peer))
-        self.client_reader, self.client_writer = reader, writer
-        self.proxy_reader, self.proxy_writer = yield from asyncio.open_connection(
-            self.peer['ip'], self.peer['port'], loop=loop)
+        self.transport = transport
 
-        loop.create_task(self.tick(self.client_reader, self.proxy_writer, self.torrent, 'a'))
-        loop.create_task(self.tick(self.proxy_reader, self.client_writer,
-            self.proxy_torrent, 'b'))
-   
-    @asyncio.coroutine
-    def tick(self, reader, writer, torrent, name):
-        data = b''
-        data_wanted = False
+        if not self.callback:
+            loop.create_task(loop.create_connection(lambda: TorrentProxy(self.peer,
+                self.peer_connected, self.transport), self.peer['ip'],
+                self.peer['port']))
+        else:
+            self.callback(self.transport)
 
-        while not self.closed:
-            print(name, self.closed)
+    def peer_connected(self, transport):
+        self.peer_transport = transport
+        if self.waiting:
+            print('[!] Flushing waiting data!')
+            print(self.waiting)
+            self.peer_transport.write(self.waiting)
+            self.waiting = b''
 
-            if data_wanted or not data:
-                raw_data = yield from reader.read(1000)
-                if not raw_data:
-                    print('[*] Connection closed.')
-                    self.close()
-                    break
-
-                writer.write(raw_data)
-                yield from writer.drain()
-                data = data + raw_data
-                data_wanted = False
-
-            try:
-                data = torrent.decode_message(data)
-            except TorrentWantData:
-                print('[*] Data wanted.')
-                data_wanted = True
-            except TorrentException as e:
-                print('[!] %s' % e)
-                self.close()
-            except struct.error:
-                print('[!] Not enough data received.')
-                self.close()
-
-    @asyncio.coroutine
-    def close(self):
-        if self.closed:
+    def data_received(self, data):
+        if not data:
+            print('[*] Connection closed.')
             return
 
-        self.client_writer.close()
-        self.proxy_writer.close()
-        self.closed = True
+        print(data)
+        if not self.peer_transport:
+            self.waiting += data
+        else:
+            self.peer_transport.write(data)
+
+        self.data += data
+
+        while self.data:
+            try:
+                self.data = self.torrent.decode_message(self.data)
+            except TorrentWantData:
+                print('[*] Data wanted.')
+                break
+            except TorrentException as e:
+                print('[!] %s' % e)
+                break
+            except struct.error:
+                print('[!] Not enough data received.')
+                break
+
+    def connection_lost(self, exc):
+        print('[!] Server disconnected.')
 
 @asyncio.coroutine
 def handle(request):
@@ -281,12 +283,19 @@ def handle(request):
     torrent = bencodepy.decode(data)
     proxied_peers = []
 
+    octet1, octet2 = 0, 37
     for peer in decode_peers(torrent[b'peers']):
-        server = yield from asyncio.start_server(lambda r, w: TorrentProxy(peer).conn(r, w),
-            '127.0.0.1', 0, loop=loop)
+        octet1 += 1
+        if octet1 == 256:
+            octet1 = 0
+            octet2 += 1
+
+        ip = '127.13.{}.{}'.format(octet2, octet1)
+        print('[*] Proxying to: {}'.format(peer))
+        server = yield from loop.create_server(lambda: TorrentProxy(peer), ip, 0)
 
         port = server.sockets[0].getsockname()[1]
-        proxied_peers.append({ 'ip': '127.0.0.1', 'port': port })
+        proxied_peers.append({ 'ip': ip, 'port': port })
 
         print('[*] Opened listener on {}'.format(port))
 
