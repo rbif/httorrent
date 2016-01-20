@@ -127,7 +127,7 @@ class TorrentProtocol:
 
         length, message_id, message = unpack('>IB', message)
         if not length:
-            return message, 'ping', (,)
+            return message, 'ping', ()
 
         length -= 1
 
@@ -253,7 +253,7 @@ class TorrentProxy(asyncio.Protocol):
 
         self.closed = False
         self.peer = peer
-        self.waiting = (,)
+        self.waiting = ()
 
         self.wanted = {}
         self.peer_wanted = peer_wanted
@@ -290,7 +290,7 @@ class TorrentProxy(asyncio.Protocol):
             for message_type, ret in self.waiting:
                 loop.create_task(self.peer_handler(message_type, ret))
 
-            self.waiting = (,)
+            self.waiting = ()
 
     def data_received(self, data):
         if not data:
@@ -391,7 +391,8 @@ class TorrentProxy(asyncio.Protocol):
         self.peer_wanted[piece, block_offset, block_length] = f
 
         yield from self.peer_handler('request', (piece, block_offset, block_length))
-        return yield from f
+        data = yield from f
+        return data
 
     # proxy side
     def add_to_active(self):
@@ -417,8 +418,17 @@ class TorrentProxy(asyncio.Protocol):
 def handle(request):
     logging.warning('Tracker connection received!')
 
-    uri = request.match_info.get('uri')
-    r = yield from aiohttp.get(sys.argv[1] + request.path_qs)
+    def create_sock(_peer, ip):
+        server = yield from loop.create_server(lambda: TorrentProxy(_peer), ip, 0)
+        port = server.sockets[0].getsockname()[1]
+        proxied_peers.append({ 'ip': ip, 'port': port })
+        return port
+
+    port = yield from create_sock({ 'ip': request.GET['ip'], 'port': request.GET['port'] })
+    path = request.path_qs.replace('port={}'.format(request.GET['port']),
+        'port={}'.format(port))
+
+    r = yield from aiohttp.get(sys.argv[1] + path)
     data = yield from r.read()
     yield from r.release()
 
@@ -426,17 +436,9 @@ def handle(request):
     proxied_peers = []
 
     base_ip = ip2int('127.13.37.0')
-    for index, peer in enumerate(decode_peers(torrent[b'peers'])):
+    for index, peer in enumerate(decode_peers(torrent[b'peers']) + [ listener ]):
         ip = int2ip(base_ip + index)
-
-        def cb(_peer):
-            return lambda: TorrentProxy(_peer)
-
-        server = yield from loop.create_server(cb(peer), ip, 0)
-
-        port = server.sockets[0].getsockname()[1]
-        proxied_peers.append({ 'ip': ip, 'port': port })
-
+        port = yield from create_sock(peer, ip) 
         logging.info('Opened listener on {}'.format(port))
 
     torrent[b'peers'] = encode_peers(proxied_peers)
