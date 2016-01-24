@@ -260,9 +260,6 @@ class TorrentProxy(asyncio.Protocol):
         self.peer = peer
         self.connected = False
 
-        # debug hax
-        peer_address['ip'] = '127.0.0.1'
-
         self.closed = False
         self.peer_address = peer_address
         self.waiting = []
@@ -451,7 +448,7 @@ def handle(request):
     port = yield from create_sock({ 
         'ip': request.GET['ip'],
         'port': request.GET['port'] 
-    }, '127.0.0.1')
+    }, request.GET['ip'])
 
     path = request.path_qs.replace('port={}'.format(request.GET['port']),
         'port={}'.format(port))
