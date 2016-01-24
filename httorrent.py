@@ -256,59 +256,55 @@ class TorrentProtocol:
         return b'\x00\x00\x00\x00'
 
 class TorrentProxy(asyncio.Protocol):
-    def __init__(self, peer, callback=None, peer_handler=None, peer_wanted=None):
-        self.peer_handler = peer_handler
-        self.callback = callback
+    def __init__(self, peer_address, peer=None):
+        self.peer = peer
+        self.connected = False
 
         # debug hax
-        peer['ip'] = '127.0.0.1'
+        peer_address['ip'] = '127.0.0.1'
 
         self.closed = False
-        self.peer = peer
+        self.peer_address = peer_address
         self.waiting = []
 
         self.wanted = {}
-        self.peer_wanted = peer_wanted
         self.data = b''
-        self.proxy_data = b''
 
-        self.peer_peer_id = None
-        self.my_peer_id = None
+        self.peer_id = None
 
         self.pre_hook = [ 'handshake' ]
         self.hooks = [ 'request', 'piece', 'cancel', 'extended', 'handshake' ]
 
-        self.torrent = TorrentProtocol(self.peer['ip'], self.peer['port'])
+        self.torrent = TorrentProtocol(self.peer_address['ip'], self.peer_address['port'])
         super().__init__()
 
     @asyncio.coroutine
     def create_connection(self):
         try:
-            yield from loop.create_connection(lambda: TorrentProxy(self.peer,
-                self.peer_connected, self.handle_message, self.wanted), self.peer['ip'],
-                self.peer['port'])
+            yield from loop.create_connection(lambda: TorrentProxy(self.peer_address, self),
+                self.peer_address['ip'], self.peer_address['port'])
         except ConnectionRefusedError:
             logging.debug('Connection refused.')
 
     def connection_made(self, transport):
         self.transport = transport
-        self.log('Connection received! Connecting to {}'.format(self.peer),
+        self.log('Connection received! Connecting to {}'.format(self.peer_address),
             logging.INFO, out=False)
 
-        if not self.callback:
+        if not self.peer:
             loop.create_task(self.create_connection())
         else:
-            self.callback(self.handle_message, self.wanted)
+            self.peer.peer_connected(self)
 
-    def peer_connected(self, peer_handler, peer_wanted):
-        self.peer_handler = peer_handler
-        self.peer_wanted = peer_wanted
+    def peer_connected(self, peer):
+        self.connected = True
+        self.peer = peer
 
         if self.waiting:
             logging.debug('Flushing waiting data!')
 
             for message_type, ret in self.waiting:
-                loop.create_task(self.peer_handler(message_type, ret))
+                loop.create_task(self.peer.handle_message(message_type, ret))
 
             self.waiting = []
 
@@ -336,10 +332,10 @@ class TorrentProxy(asyncio.Protocol):
             if message_type in self.pre_hook:
                 loop.create_task(getattr(self, 'do_pre_' + message_type)(*ret))
 
-            if not self.peer_handler:
+            if not self.peer:
                 self.waiting.append((message_type, ret))
             else:
-                loop.create_task(self.peer_handler(message_type, ret))
+                loop.create_task(self.peer.handle_message(message_type, ret))
 
     @asyncio.coroutine
     def handle_message(self, message_type, ret, skip_hooks=False):
@@ -358,13 +354,12 @@ class TorrentProxy(asyncio.Protocol):
 
     @asyncio.coroutine
     def do_pre_handshake(self, reserved, info_hash, peer_id):
-        self.my_peer_id = peer_id
+        self.peer_id = peer_id
         self.info_hash = info_hash
         self.add_to_active()
 
     @asyncio.coroutine
     def do_handshake(self, reserved, info_hash, peer_id):
-        self.peer_peer_id = peer_id
         self.add_to_active()
         return True
 
@@ -376,22 +371,19 @@ class TorrentProxy(asyncio.Protocol):
     # proxy side
     @asyncio.coroutine
     def do_request(self, piece, block_offset, block_length):
-        if not self.my_peer_id or not self.peer_peer_id:
+        if not self.peer_id or not self.peer.peer_id:
             return True
 
         r = yield from aiohttp.get('http://127.0.0.1:{}/piece/{}/{}/{}/{}/{}'.format(
-            sys.argv[3], self.my_peer_id, self.peer_peer_id, piece, block_offset,
+            sys.argv[3], self.peer_id, self.peer.peer_id, piece, block_offset,
             block_length))
         data = yield from r.read()
         yield from r.release()
 
-        yield from self.peer_handler('piece', (piece, block_offset, data))
+        yield from self.peer.handle_message('piece', (piece, block_offset, data))
 
     @asyncio.coroutine
     def do_piece(self, *args):
-        if not self.my_peer_id or not self.peer_peer_id:
-            return True
-
         key = args[:2] + (len(args[2]), )
         if key not in self.wanted:
             return True
@@ -401,9 +393,6 @@ class TorrentProxy(asyncio.Protocol):
 
     @asyncio.coroutine
     def do_cancel(self, args):
-        if not self.my_peer_id or not self.peer_peer_id:
-            return True
-
         if args not in self.wanted:
             return True
 
@@ -414,25 +403,26 @@ class TorrentProxy(asyncio.Protocol):
     @asyncio.coroutine
     def get_piece(self, piece, block_offset, block_length):
         f = asyncio.Future()
-        self.peer_wanted[piece, block_offset, block_length] = f
+        self.peer.wanted[piece, block_offset, block_length] = f
 
-        yield from self.peer_handler('request', (piece, block_offset, block_length), True)
+        yield from self.peer.handle_message('request', (piece, block_offset, block_length),
+            True)
         data = yield from f
         return data
 
     # proxy side
     def add_to_active(self):
-        if not self.my_peer_id or not self.peer_peer_id:
+        if not self.peer or not self.peer_id or not self.peer.peer_id:
             return
 
-        active[self.my_peer_id, self.peer_peer_id] = self.get_piece
+        active[self.peer_id, self.peer.peer_id] = self.get_piece
 
     def remove_from_active(self):
-        if not self.my_peer_id or not self.peer_peer_id:
+        if not self.peer or not self.peer_id or not self.peer.peer_id:
             return
 
-        if (self.my_peer_id, self.peer_peer_id) in active:
-            del active[self.my_peer_id, self.peer_peer_id]
+        if (self.peer_id, self.peer.peer_id) in active:
+            del active[self.peer_id, self.peer.peer_id]
 
     def connection_lost(self, exc):
         self.log('Server disconnected.', logging.WARNING)
