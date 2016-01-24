@@ -497,8 +497,8 @@ def init(loop):
     app.router.add_route('GET', '/{uri}', handle)
     app.router.add_route('GET', '/piece/{source_peer_id}/{peer_id}/{piece}/{block_offset}/{block_length}', handle_piece)
 
-    srv = yield from loop.create_server(app.make_handler(), '127.0.0.1', int(sys.argv[2]))
-    logging.warning("Server started at http://127.0.0.1:{}".format(sys.argv[2]))
+    srv = yield from loop.create_server(app.make_handler(), '0.0.0.0', int(sys.argv[2]))
+    logging.warning("Server started at http://0.0.0.0:{}".format(sys.argv[2]))
     return srv
 
 if len(sys.argv) != 4:
