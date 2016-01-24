@@ -374,7 +374,7 @@ class TorrentProxy(asyncio.Protocol):
         if not self.peer_id or not self.peer.peer_id:
             return True
 
-        r = yield from aiohttp.get('http://127.0.0.1:{}/piece/{}/{}/{}/{}/{}'.format(
+        r = yield from aiohttp.get('{}/piece/{}/{}/{}/{}/{}'.format(
             sys.argv[3], self.peer_id, self.peer.peer_id, piece, block_offset,
             block_length))
         data = yield from r.read()
@@ -505,7 +505,7 @@ def init(loop):
     return srv
 
 if len(sys.argv) != 4:
-    logging.error('Usage: {} <tracker> <http listen port> <http peer port>'.format(sys.argv[0]))
+    logging.error('Usage: {} <tracker> <http listen port> <peer url>'.format(sys.argv[0]))
     quit()
 
 loop = asyncio.get_event_loop()
